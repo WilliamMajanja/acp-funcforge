@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acp-funcforge"
+version = "0.1.0"
+description = "Functional decomposition and software building via local OpenCode ACP servers (no ML/MCP in app)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["opencode", "acp", "agent-client-protocol", "functional-decomposition", "code-generation", "cli", "fastapi"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Environment :: Console",
+  "Framework :: FastAPI",
+  "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+  "click>=8",
+  "fastapi>=0.110",
+  "uvicorn>=0.23",
+]
+
+[project.optional-dependencies]
+dev = []
+
+[project.scripts]
+acp-funcforge = "acp_funcforge.cli:main"
+
+[tool.setuptools]
+packages = ["acp_funcforge"]
