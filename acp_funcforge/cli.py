@@ -64,6 +64,17 @@ def _split_csv(values: tuple[str, ...]) -> list[str]:
     return out
 
 
+def _make_stream_printer(enabled: bool):
+    """Return an on_text callback that echoes agent text live, or None."""
+    if not enabled:
+        return None
+    import sys as _sys
+    def _print(chunk: str) -> None:
+        click.echo(chunk, nl=False)
+        _sys.stdout.flush()
+    return _print
+
+
 @main.command("read-code")
 @click.argument("path")
 @click.option("--cwd", default=".", help="Base directory for relative paths.")
@@ -115,7 +126,9 @@ def scan_code(root: str, globs: tuple[str, ...], excludes: tuple[str, ...], max_
 @click.option("--context-max-chars", default=120_000, type=int, show_default=True)
 @click.option("--json-out", "json_out", default=None, help="Write decomposition JSON to this path.")
 @click.option("--timeout", default=600, type=float, help="ACP prompt timeout in seconds.")
-def decompose(goal: str, language: str, cwd: str, context_paths: tuple[str, ...], context_globs: tuple[str, ...], context_max_chars: int, json_out: str | None, timeout: float):
+@click.option("--stream/--no-stream", default=True, show_default=True, help="Stream agent text live while it works.")
+@click.option("--resume/--fresh", default=False, show_default=True, help="Resume the last saved decomposition session.")
+def decompose(goal: str, language: str, cwd: str, context_paths: tuple[str, ...], context_globs: tuple[str, ...], context_max_chars: int, json_out: str | None, timeout: float, stream: bool, resume: bool):
     """Decompose GOAL into functions/modules using a local ACP server."""
     cwd = os.path.abspath(cwd)
     dec = FunctionalDecomposer(cwd=cwd)
@@ -127,6 +140,8 @@ def decompose(goal: str, language: str, cwd: str, context_paths: tuple[str, ...]
             context_paths=list(context_paths) or None,
             context_globs=_split_csv(context_globs) or None,
             context_max_chars=context_max_chars,
+            on_text=_make_stream_printer(stream),
+            resume=resume,
         )
         data = dec.to_dict(result)
         out = json.dumps(data, ensure_ascii=False, indent=2)
@@ -151,7 +166,10 @@ def decompose(goal: str, language: str, cwd: str, context_paths: tuple[str, ...]
 @click.option("--context-glob", "context_globs", multiple=True, help="Glob(s) to select context files when scanning.")
 @click.option("--context-max-chars", default=120_000, type=int, show_default=True)
 @click.option("--timeout", default=900, type=float, help="ACP prompt timeout in seconds.")
-def build(goal: str, language: str, output_dir: str, cwd: str, context_paths: tuple[str, ...], context_globs: tuple[str, ...], context_max_chars: int, timeout: float):
+@click.option("--stream/--no-stream", default=True, show_default=True, help="Stream agent text live while it works.")
+@click.option("--verify/--no-verify", default=True, show_default=True, help="Run a verification pass: agent runs generated tests and fixes failures.")
+@click.option("--resume/--fresh", default=False, show_default=True, help="Resume the last saved build session in the output directory.")
+def build(goal: str, language: str, output_dir: str, cwd: str, context_paths: tuple[str, ...], context_globs: tuple[str, ...], context_max_chars: int, timeout: float, stream: bool, verify: bool, resume: bool):
     """Decompose GOAL and build software into OUTPUT using a local ACP server."""
     cwd = os.path.abspath(cwd)
     output_dir = os.path.abspath(output_dir)
@@ -180,6 +198,9 @@ def build(goal: str, language: str, output_dir: str, cwd: str, context_paths: tu
             context_paths=list(context_paths) or None,
             context_globs=_split_csv(context_globs) or None,
             context_max_chars=context_max_chars,
+            on_text=_make_stream_printer(stream),
+            verify=verify,
+            resume=resume,
         )
         payload = {
             "success": result.success,

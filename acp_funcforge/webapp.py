@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
+import queue
 import tempfile
-from typing import Any, Optional
+import threading
+from typing import Any, Generator, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .builder import SoftwareBuilder
@@ -77,106 +80,217 @@ def index() -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>ACP FuncForge</title>
   <style>
-    body{font-family:system-ui,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;line-height:1.4}
-    textarea,input{width:100%;box-sizing:border-box;padding:.6rem;margin:.25rem 0 .75rem}
-    textarea{min-height:110px}
-    button{padding:.6rem 1rem;cursor:pointer}
-    pre{background:#111;color:#eee;padding:1rem;overflow:auto;border-radius:8px;white-space:pre-wrap}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-    .card{border:1px solid #ddd;border-radius:10px;padding:1rem;margin:1rem 0}
-    small{color:#555}
+    :root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;--ok:#3fb950;--bad:#f85149}
+    *{box-sizing:border-box}
+    body{font-family:system-ui,sans-serif;margin:0;background:var(--bg);color:var(--text)}
+    header{padding:1rem 1.5rem;border-bottom:1px solid var(--border);display:flex;gap:1rem;align-items:baseline}
+    header h1{margin:0;font-size:1.2rem}
+    header span{color:var(--muted);font-size:.85rem}
+    main{max-width:1100px;margin:0 auto;padding:1.5rem;display:grid;grid-template-columns:340px 1fr;gap:1.25rem}
+    .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:1rem}
+    .panel h2{margin:.2rem 0 .8rem;font-size:.95rem}
+    label{display:block;font-size:.78rem;color:var(--muted);margin:.5rem 0 .2rem}
+    textarea,input{width:100%;padding:.5rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;font:inherit}
+    textarea{min-height:80px;resize:vertical}
+    button{padding:.55rem .9rem;margin-top:.7rem;cursor:pointer;background:var(--accent);color:#04121f;border:0;border-radius:6px;font-weight:600}
+    button:disabled{opacity:.5;cursor:wait}
+    button.secondary{background:var(--border);color:var(--text)}
+    .phase{display:flex;gap:.4rem;margin:.4rem 0}
+    .phase div{flex:1;text-align:center;padding:.4rem;border-radius:6px;background:var(--bg);border:1px solid var(--border);font-size:.8rem;color:var(--muted)}
+    .phase div.active{border-color:var(--accent);color:var(--accent)}
+    .phase div.ok{border-color:var(--ok);color:var(--ok)}
+    .phase div.bad{border-color:var(--bad);color:var(--bad)}
+    pre{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:.8rem;min-height:220px;max-height:480px;overflow:auto;white-space:pre-wrap;font-size:.82rem;margin:.6rem 0 0}
+    .steps{margin-top:.6rem;font-size:.8rem}
+    .steps div{padding:.3rem .5rem;border-bottom:1px solid var(--border)}
+    .badge{padding:.05rem .4rem;border-radius:4px;font-size:.72rem}
+    .badge.ok{background:rgba(63,185,80,.15);color:var(--ok)}
+    .badge.bad{background:rgba(248,81,73,.15);color:var(--bad)}
+    small{color:var(--muted)}
+    @media(max-width:800px){main{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
-  <h1>ACP FuncForge</h1>
-  <p>Functional decomposition and software building using <strong>local OpenCode ACP servers</strong> (<code>opencode acp</code>). No ML tools or MCP servers are used by this app. Reads/writes code in any programming language.</p>
-
-  <div class="card">
-    <h2>Read / Write / Scan Code (any language)</h2>
-    <div class="row">
-      <div><label>Path</label><input id="f-path" placeholder="src/main.py, app.go, lib.rs, index.ts ..."/></div>
-      <div><label>Base cwd (optional)</label><input id="f-cwd" placeholder="/path/to/project"/></div>
-    </div>
-    <button onclick="runRead()">Read file</button>
-    <label>Content (for write)</label><textarea id="f-content" placeholder="Code content to write"></textarea>
-    <button onclick="runWrite()">Write file</button>
-    <div class="row">
-      <div><label>Scan root</label><input id="s-root" value="."/></div>
-      <div><label>Include globs (comma)</label><input id="s-globs" placeholder="*.py,src/**/*.ts"/></div>
-    </div>
-    <button onclick="runScan()">Scan code</button>
-    <pre id="f-out">Result will appear here.</pre>
-  </div>
-
-  <div class="card">
-    <h2>Functional Decomposition</h2>
-    <label>Goal / specification</label>
-    <textarea id="d-goal" placeholder="Describe what to build or decompose..."></textarea>
-    <div class="row">
-      <div><label>Target language</label><input id="d-lang" value="any"/></div>
-      <div><label>Working directory (optional)</label><input id="d-cwd" placeholder="/path/to/project"/></div>
-    </div>
-    <label>Context paths (comma-separated files/dirs, optional)</label><input id="d-ctx" placeholder="src/,main.py"/>
-    <label>Context globs (comma, optional)</label><input id="d-globs" placeholder="*.py,src/**/*.rs"/>
-    <button onclick="runDecompose()">Decompose</button>
-    <pre id="d-out">Result will appear here.</pre>
-  </div>
-
-  <div class="card">
-    <h2>Build Software</h2>
-    <label>Goal / specification</label>
-    <textarea id="b-goal" placeholder="Describe the software to build..."></textarea>
-    <div class="row">
-      <div><label>Target language</label><input id="b-lang" value="python"/></div>
-      <div><label>Output directory (optional)</label><input id="b-outdir" placeholder="Defaults to a temp folder"/></div>
-    </div>
-    <label>Working directory (optional)</label><input id="b-cwd" placeholder="/path/to/project"/>
-    <label>Context paths (comma-separated files/dirs, optional)</label><input id="b-ctx" placeholder="existing/src"/>
-    <label>Context globs (comma, optional)</label><input id="b-globs" placeholder="**/*.go"/>
-    <button onclick="runBuild()">Decompose + Build</button>
-    <small>Build can take several minutes while the local ACP/OpenCode agent works.</small>
-    <pre id="b-out">Result will appear here.</pre>
-  </div>
-
+  <header><h1>ACP FuncForge</h1><span>plan &rarr; decompose &rarr; build, streamed live from local OpenCode ACP agents</span></header>
+  <main>
+    <section class="panel" id="left">
+      <h2>Goal</h2>
+      <textarea id="goal" placeholder="Describe what to build..."></textarea>
+      <div class="phase">
+        <div id="ph-plan">Plan</div><div id="ph-decompose">Decompose</div><div id="ph-build">Build</div><div id="ph-verify">Verify</div>
+      </div>
+      <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem">
+        <div><label>Language</label><input id="lang" value="python"/></div>
+        <div><label>Output dir</label><input id="outdir" placeholder="temp folder"/></div>
+      </div>
+      <label>Context paths (comma)</label><input id="ctx" placeholder="src/, main.py"/>
+      <button id="run" onclick="runPipeline()">Decompose + Build &#9654;</button>
+      <button class="secondary" onclick="runPipeline(true)">Decompose only</button>
+      <button class="secondary" onclick="reset()">Reset</button>
+      <small>Streams agent output live via SSE.</small>
+    </section>
+    <section class="panel">
+      <h2>Agent output</h2>
+      <pre id="out">Ready.</pre>
+      <div id="steps" class="steps"></div>
+    </section>
+  </main>
 <script>
-async function post(url, body, outId){
-  const out = document.getElementById(outId);
-  out.textContent = 'Working...';
-  try {
-    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    const t = await r.text();
-    let v; try{v=JSON.parse(t)}catch{v=t}
-    out.textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
-  } catch(e){ out.textContent = String(e); }
+let phase = null;
+function setPhase(name, state){
+  for (const p of ['plan','decompose','build','verify']){
+    const el = document.getElementById('ph-'+p);
+    el.className = p===name ? (state||'active') : '';
+  }
 }
-function split(v){ return (v||'').split(',').map(s=>s.trim()).filter(Boolean); }
-function runRead(){ post('/api/read-code', {path: fpath(), cwd: fcwd()}, 'f-out'); }
-function runWrite(){ post('/api/write-code', {path: fpath(), cwd: fcwd(), content: document.getElementById('f-content').value}, 'f-out'); }
-function runScan(){ post('/api/scan-code', {root: document.getElementById('s-root').value||'.', include_globs: split(document.getElementById('s-globs').value), cwd: fcwd()}, 'f-out'); }
-function fpath(){ return document.getElementById('f-path').value; }
-function fcwd(){ return document.getElementById('f-cwd').value || null; }
-function runDecompose(){
-  post('/api/decompose', {
-    goal: document.getElementById('d-goal').value,
-    language: document.getElementById('d-lang').value || 'any',
-    cwd: document.getElementById('d-cwd').value || null,
-    context_paths: split(document.getElementById('d-ctx').value),
-    context_globs: split(document.getElementById('d-globs').value)
-  }, 'd-out');
+function appendOut(t){ const o=document.getElementById('out'); o.textContent+=t; o.scrollTop=o.scrollHeight; }
+function addStep(s){
+  const d=document.createElement('div');
+  const cls = s.status==='ok'||s.status==='passing' ? 'ok' : (s.status==='failed' ? 'bad' : '');
+  d.innerHTML = '<span class="badge '+cls+'">'+s.status+'</span> <b>'+s.name+'</b> &mdash; '+String(s.detail||'').replace(/</g,'&lt;');
+  document.getElementById('steps').appendChild(d);
 }
-function runBuild(){
-  post('/api/build', {
-    goal: document.getElementById('b-goal').value,
-    language: document.getElementById('b-lang').value || 'any',
-    output_dir: document.getElementById('b-outdir').value || null,
-    cwd: document.getElementById('b-cwd').value || null,
-    context_paths: split(document.getElementById('b-ctx').value),
-    context_globs: split(document.getElementById('b-globs').value)
-  }, 'b-out');
+async function runPipeline(decomposeOnly){
+  reset(false);
+  document.getElementById('run').disabled = true;
+  const body = {
+    goal: document.getElementById('goal').value,
+    language: document.getElementById('lang').value || 'python',
+    output_dir: document.getElementById('outdir').value || null,
+    context_paths: (document.getElementById('ctx').value||'').split(',').map(s=>s.trim()).filter(Boolean)
+  };
+  const url = decomposeOnly ? '/api/decompose/stream' : '/api/build/stream';
+  setPhase('plan');
+  try{
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf='';
+    while(true){
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream:true});
+      let idx;
+      while((idx = buf.indexOf('\n\n')) >= 0){
+        const block = buf.slice(0, idx); buf = buf.slice(idx+2);
+        const ev = (block.match(/event: (.*)/)||[])[1];
+        const data = block.replace(/event: .*\n/, '').replace('data: ', '');
+        if (ev === 'text'){
+          setPhase('decompose');
+          appendOut(JSON.parse(data));
+        } else if (ev === 'done'){
+          const v = JSON.parse(data);
+          document.getElementById('out').textContent += '\n\n=== RESULT ===\n' + JSON.stringify(v, null, 2);
+          setPhase('verify', v.success ? 'ok' : 'bad');
+          if (v.steps) v.steps.forEach(addStep);
+        } else if (ev === 'error'){
+          document.getElementById('out').textContent += '\n\n=== ERROR ===\n' + (JSON.parse(data).detail||'');
+          setPhase(phase, 'bad');
+        }
+      }
+    }
+  } catch(e){ appendOut('\n[connection error] '+e); setPhase(phase,'bad'); }
+  document.getElementById('run').disabled = false;
+}
+function reset(clearOut){
+  if (clearOut !== false){ document.getElementById('out').textContent=''; document.getElementById('steps').innerHTML=''; }
+  setPhase(null);
 }
 </script>
 </body>
 </html>"""
+
+
+def _sse(event: str, data: Any) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _run_streaming(work: Any, req: Any) -> Generator[str, None, None]:
+    """Run `work(on_text)` in a thread; stream text/step/done/error events as SSE."""
+    q: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+    def on_text(chunk: str) -> None:
+        q.put(("text", chunk))
+
+    def runner() -> None:
+        try:
+            result = work(on_text)
+            q.put(("done", result))
+        except Exception as e:
+            q.put(("error", {"detail": str(e)}))
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    while True:
+        try:
+            kind, payload = q.get(timeout=1800.0)
+        except queue.Empty:
+            yield _sse("error", {"detail": "stream timed out"})
+            return
+        if kind == "text":
+            yield _sse("text", payload)
+        elif kind == "done":
+            yield _sse("done", payload)
+            return
+        else:
+            yield _sse("error", payload)
+            return
+
+
+@app.post("/api/decompose/stream")
+def api_decompose_stream(req: DecomposeRequest) -> StreamingResponse:
+    cwd = req.cwd or os.getcwd()
+
+    def work(on_text: Any) -> dict[str, Any]:
+        dec = FunctionalDecomposer(cwd=cwd)
+        try:
+            result = dec.decompose(
+                goal=req.goal, language=req.language, timeout=req.timeout,
+                context=req.context or "", context_paths=req.context_paths,
+                context_globs=req.context_globs, context_max_chars=req.context_max_chars,
+                on_text=on_text,
+            )
+            return dec.to_dict(result)
+        finally:
+            dec.close()
+
+    return StreamingResponse(_run_streaming(work, req), media_type="text/event-stream")
+
+
+@app.post("/api/build/stream")
+def api_build_stream(req: BuildRequest) -> StreamingResponse:
+    cwd = req.cwd or os.getcwd()
+    output_dir = os.path.abspath(req.output_dir or os.path.join(tempfile.gettempdir(), "acp-funcforge-build"))
+
+    def work(on_text: Any) -> dict[str, Any]:
+        dec = FunctionalDecomposer(cwd=cwd)
+        try:
+            decomposition = dec.decompose(
+                goal=req.goal, language=req.language, timeout=min(req.timeout, 600),
+                context=req.context or "", context_paths=req.context_paths,
+                context_globs=req.context_globs, context_max_chars=req.context_max_chars,
+                on_text=on_text,
+            )
+            decomposition_data = dec.to_dict(decomposition)
+        finally:
+            dec.close()
+        builder = SoftwareBuilder(cwd=output_dir)
+        try:
+            result = builder.build(
+                goal=req.goal, decomposition=decomposition, output_dir=output_dir,
+                language=req.language, timeout=req.timeout, context=req.context or "",
+                context_paths=req.context_paths, context_globs=req.context_globs,
+                context_max_chars=req.context_max_chars, on_text=on_text,
+            )
+            return {
+                "success": result.success,
+                "output_dir": result.output_dir,
+                "steps": [s.__dict__ for s in result.steps],
+                "summary": result.summary,
+                "decomposition": decomposition_data,
+            }
+        finally:
+            builder.close()
+
+    return StreamingResponse(_run_streaming(work, req), media_type="text/event-stream")
 
 
 @app.get("/api/health")

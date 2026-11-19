@@ -92,13 +92,30 @@ class FunctionalDecomposer:
         context_paths: Optional[list[str]] = None,
         context_globs: Optional[list[str]] = None,
         context_max_chars: int = 120_000,
+        on_text: Optional[Any] = None,
+        resume: bool = False,
     ) -> DecompositionResult:
+        from . import state as state_store
         client = self._get_client()
         client.start()
         client.initialize()
-        sid = client.new_session(cwd=self.cwd)
+        client.on_text = on_text
+        saved = state_store.get_session(self.cwd, "decompose_session") if resume else None
+        if saved:
+            try:
+                client.load_session(saved, cwd=self.cwd)
+                sid = saved
+            except Exception:
+                sid = None  # stale session; fall back to a fresh one
+        else:
+            sid = None
+        if not sid:
+            sid = client.new_session(cwd=self.cwd)
+            state_store.update_state(self.cwd, decompose_session=sid, last_goal=goal, last_language=language)
         ctx = self._build_context(context=context, context_paths=context_paths, context_globs=context_globs, max_chars=context_max_chars)
         prompt = DECOMPOSE_PROMPT.format(language=language, goal=goal, context=ctx or "(none provided)")
+        if resume and saved:
+            prompt = f"Revisit and improve your previous decomposition for this goal, returning the full JSON again.\n\n{prompt}"
         resp = client.prompt(sid, prompt, timeout=timeout)
         raw = (resp.get("updates_text") or "") or json.dumps(resp.get("result"), ensure_ascii=False)
         data = self._parse_json(raw)

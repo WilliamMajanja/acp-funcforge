@@ -47,6 +47,7 @@ class ACPClient:
         self._stderr_reader: Optional[threading.Thread] = None
         self._updates: queue.Queue[dict[str, Any]] = queue.Queue()
         self._closed = False
+        self.on_text: Optional[Callable[[str], None]] = None
         self.agent_info: Any = None
         self.agent_capabilities: Any = None
 
@@ -106,7 +107,15 @@ class ACPClient:
 
     def _emit(self, event: ACPEvent) -> None:
         if event.method in ("session/update", "session/notification", "notifications/message"):
-            self._updates.put(event.raw or {"method": event.method, "params": event.params})
+            raw = event.raw or {"method": event.method, "params": event.params}
+            self._updates.put(raw)
+            if self.on_text:
+                chunk = self._extract_text(raw)
+                if chunk:
+                    try:
+                        self.on_text(chunk)
+                    except Exception:
+                        pass
         if self.event_handler:
             try:
                 self.event_handler(event)
@@ -238,15 +247,31 @@ class ACPClient:
             pass
         return result
 
-    def new_session(self, cwd: Optional[str] = None, mcp_servers: Optional[list[Any]] = None) -> str:
+    def new_session(self, cwd: Optional[str] = None, mcp_servers: Optional[list[Any]] = None, retries: int = 2) -> str:
         params: dict[str, Any] = {"cwd": os.path.abspath(cwd or self.cwd), "mcpServers": mcp_servers or []}
-        result = self.request("session/new", params, timeout=120.0)
-        sid = (result or {}).get("sessionId") or (result or {}).get("session", {}).get("id")
-        if not sid:
-            raise RuntimeError(f"session/new returned no sessionId: {result}")
-        return sid
+        last_err: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                result = self.request("session/new", params, timeout=120.0)
+                sid = (result or {}).get("sessionId") or (result or {}).get("session", {}).get("id")
+                if not sid:
+                    raise RuntimeError(f"session/new returned no sessionId: {result}")
+                return sid
+            except RuntimeError as e:
+                last_err = e
+                # Transient provider/session hiccups are common; retry with backoff.
+                if attempt < retries and ("ServiceUnavailable" in str(e) or "Internal" in str(e) or "quota" in str(e)):
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                raise
+        raise last_err  # pragma: no cover
 
-    def prompt(self, session_id: str, text: str, timeout: float = 600.0) -> dict[str, Any]:
+    def load_session(self, session_id: str, cwd: Optional[str] = None) -> dict[str, Any]:
+        """Resume a previous ACP session (agent must advertise loadSession)."""
+        params: dict[str, Any] = {"sessionId": session_id, "cwd": os.path.abspath(cwd or self.cwd)}
+        return self.request("session/load", params, timeout=120.0) or {}
+
+    def prompt(self, session_id: str, text: str, timeout: float = 600.0, collect_seconds: float = 2.0) -> dict[str, Any]:
         # Drain old updates
         while True:
             try:
@@ -261,7 +286,7 @@ class ACPClient:
         result = self.request("session/prompt", params, timeout=timeout)
         chunks: list[str] = []
         # Collect updates that arrived during/just after the request.
-        deadline = time.time() + 2.0
+        deadline = time.time() + collect_seconds
         while time.time() < deadline:
             try:
                 upd = self._updates.get(timeout=0.1)

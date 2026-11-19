@@ -57,6 +57,18 @@ When finished, respond with a JSON summary:
 """
 
 
+VERIFY_PROMPT = """Verification pass.
+You just wrote code into {output_dir}. Now:
+- Discover how tests are run for this project (pytest, npm test, cargo test, go test, ...)
+- Run the tests.
+- If any test fails, fix the code (not the test intent) and re-run until they pass or you are sure the failure is environmental.
+- Do not add new features.
+
+When finished, respond with a JSON summary:
+{{"status": "passing" | "failing" | "environmental", "ran": "<command used>", "fixes": ["..."], "notes": "..."}}
+"""
+
+
 class SoftwareBuilder:
     def __init__(self, client: Optional[ACPClient] = None, cwd: Optional[str] = None):
         self.client = client
@@ -83,16 +95,33 @@ class SoftwareBuilder:
         context_paths: Optional[list[str]] = None,
         context_globs: Optional[list[str]] = None,
         context_max_chars: int = 120_000,
+        on_text: Optional[Any] = None,
+        verify: bool = True,
+        resume: bool = False,
     ) -> BuildResult:
+        from . import state as state_store
         os.makedirs(output_dir, exist_ok=True)
         steps: list[BuildStep] = []
         raws: list[str] = []
+        success = False
         try:
             client = self._get_client()
             client.start()
             client.initialize()
+            client.on_text = on_text
             steps.append(BuildStep("initialize", "ok", f"agent={getattr(client,'agent_info',None)}"))
-            sid = client.new_session(cwd=output_dir)
+            saved = state_store.get_session(output_dir, "build_session") if resume else None
+            if saved:
+                try:
+                    client.load_session(saved, cwd=output_dir)
+                    sid = saved
+                except Exception:
+                    sid = None
+            else:
+                sid = None
+            if not sid:
+                sid = client.new_session(cwd=output_dir)
+                state_store.update_state(output_dir, build_session=sid)
             steps.append(BuildStep("session", "ok", f"session={sid}"))
             ctx = self._build_context(context=context, context_paths=context_paths, context_globs=context_globs, max_chars=context_max_chars)
             prompt = BUILD_PROMPT.format(
@@ -105,20 +134,55 @@ class SoftwareBuilder:
             resp = client.prompt(sid, prompt, timeout=timeout)
             raw = (resp.get("updates_text") or "") or json.dumps(resp.get("result"), ensure_ascii=False)
             raws.append(raw)
-            artifacts = []
-            try:
-                for root, _, files in os.walk(output_dir):
-                    for f in files:
-                        artifacts.append(os.path.relpath(os.path.join(root, f), output_dir))
-            except Exception:
-                pass
-            steps.append(BuildStep("build", "ok", "ACP prompt completed", artifacts=artifacts[:200]))
-            return BuildResult(goal, language, os.path.abspath(output_dir), steps, True, raw[:2000], raws)
+            steps.append(BuildStep("build", "ok", "ACP prompt completed", artifacts=self._list_artifacts(output_dir)))
+
+            if verify:
+                vresp = client.prompt(sid, VERIFY_PROMPT.format(output_dir=os.path.abspath(output_dir)), timeout=timeout)
+                vraw = (vresp.get("updates_text") or "") or json.dumps(vresp.get("result"), ensure_ascii=False)
+                raws.append(vraw)
+                vdata = self._parse_summary_json(vraw)
+                status = str(vdata.get("status", "")).lower()
+                ok = status in ("passing", "environmental", "")
+                steps.append(BuildStep("verify", "ok" if ok else "failed", f"status={vdata.get('status') or 'unknown'} ran={vdata.get('ran', '')}", artifacts=self._list_artifacts(output_dir)))
+                summary_tail = f"verification: {vdata.get('notes', '') or vraw[:500]}"
+                success = True
+                combined = raw[:1500] + "\n\n" + summary_tail
+                return BuildResult(goal, language, os.path.abspath(output_dir), steps, success, combined[:2000], raws)
+
+            artifacts = self._list_artifacts(output_dir)
+            success = True
+            return BuildResult(goal, language, os.path.abspath(output_dir), steps, success, raw[:2000], raws)
         except Exception as e:
             steps.append(BuildStep("error", "failed", str(e)))
             return BuildResult(goal, language, os.path.abspath(output_dir), steps, False, str(e), raws)
         finally:
             pass
+
+    @staticmethod
+    def _list_artifacts(output_dir: str) -> list[str]:
+        artifacts: list[str] = []
+        try:
+            for root, _, files in os.walk(output_dir):
+                for f in files:
+                    rel = os.path.relpath(os.path.join(root, f), output_dir)
+                    if ".funcforge" not in rel.split(os.sep):
+                        artifacts.append(rel)
+        except Exception:
+            pass
+        return artifacts[:200]
+
+    @staticmethod
+    def _parse_summary_json(text: str) -> dict[str, Any]:
+        import re
+        m = re.search(r"\{[\s\S]*\}", text or "")
+        if m:
+            try:
+                d = json.loads(m.group(0))
+                if isinstance(d, dict):
+                    return d
+            except Exception:
+                pass
+        return {}
 
     def _build_context(
         self,
