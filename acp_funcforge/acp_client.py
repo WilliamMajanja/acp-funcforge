@@ -204,6 +204,12 @@ class ACPClient:
         try:
             self._send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}})
             msg = q.get(timeout=timeout)
+        except queue.Empty:
+            raise RuntimeError(
+                f"ACP {method} timed out after {timeout}s with no response from the agent. "
+                "Try a larger --timeout, or use a faster model in your OpenCode config "
+                "(~/.config/opencode/opencode.json)."
+            ) from None
         finally:
             self._pending.pop(req_id, None)
         if "error" in msg:

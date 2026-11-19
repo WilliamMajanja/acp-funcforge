@@ -254,6 +254,9 @@ def api_build(req: BuildRequest) -> dict[str, Any]:
     builder = SoftwareBuilder(cwd=output_dir)
     try:
         decomposition = dec.decompose(goal=req.goal, language=req.language, timeout=min(req.timeout, 600), context=req.context or "", context_paths=req.context_paths, context_globs=req.context_globs, context_max_chars=req.context_max_chars)
+        # Release the decomposer's ACP server before the builder starts its own,
+        # so two OpenCode servers don't run concurrently (causes session/new failures).
+        dec.close()
         result = builder.build(goal=req.goal, decomposition=decomposition, output_dir=output_dir, language=req.language, timeout=req.timeout, context=req.context or "", context_paths=req.context_paths, context_globs=req.context_globs, context_max_chars=req.context_max_chars)
         return {
             "success": result.success,

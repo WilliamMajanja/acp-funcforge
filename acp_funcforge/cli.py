@@ -34,6 +34,26 @@ def main():
     """
 
 
+def _friendly_error(msg: str) -> str:
+    """Turn raw ACP/provider errors into actionable user-facing messages."""
+    low = msg.lower()
+    if "provider.quota" in low or "more credits" in low or "can only afford" in low:
+        return (
+            "The configured model provider ran out of quota/credits.\n"
+            f"Detail: {msg}\n"
+            "Fix: set a default model in your OpenCode config (~/.config/opencode/opencode.json), "
+            "e.g. \"model\": \"ollama/<local-model>\" for a local provider, or top up credits "
+            "at the provider's billing page."
+        )
+    if "session/prompt error" in low or "session/new" in low or "initialize" in low:
+        return (
+            f"The local ACP agent failed: {msg}\n"
+            "Fix: run `acp-funcforge doctor` to diagnose, and check `opencode` is installed "
+            "and authenticated/`opencode.json` points at a working model."
+        )
+    return msg
+
+
 def _split_csv(values: tuple[str, ...]) -> list[str]:
     out: list[str] = []
     for v in values:
@@ -115,6 +135,9 @@ def decompose(goal: str, language: str, cwd: str, context_paths: tuple[str, ...]
                 f.write(out)
             click.echo(f"Wrote decomposition to {json_out}")
         click.echo(out)
+    except RuntimeError as e:
+        click.secho(f"Error: {_friendly_error(str(e))}", fg="red", err=True)
+        sys.exit(1)
     finally:
         dec.close()
 
@@ -145,6 +168,9 @@ def build(goal: str, language: str, output_dir: str, cwd: str, context_paths: tu
             context_max_chars=context_max_chars,
         )
         click.echo(f"Decomposed into {len(decomposition.functions)} function(s). Building...")
+        # Release the decomposer's ACP server before the builder starts its own,
+        # so two OpenCode servers don't run concurrently (causes session/new failures).
+        dec.close()
         result = builder.build(
             goal=goal,
             decomposition=decomposition,
@@ -163,6 +189,9 @@ def build(goal: str, language: str, output_dir: str, cwd: str, context_paths: tu
         }
         click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
         sys.exit(0 if result.success else 1)
+    except RuntimeError as e:
+        click.secho(f"Error: {_friendly_error(str(e))}", fg="red", err=True)
+        sys.exit(1)
     finally:
         dec.close()
         builder.close()
